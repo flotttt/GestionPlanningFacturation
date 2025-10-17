@@ -25,7 +25,7 @@ export async function POST(req: Request) {
                 return { error: 'Aucune prestation terminée sur la période.' }
             }
 
-            // Numérotation simple FAC-YYYY-####
+            // Numérotation FAC-YYYY-###
             const year = new Date().getFullYear()
             const last = await tx.invoice.findFirst({
                 where: { numero: { startsWith: `FAC-${year}-` } },
@@ -34,7 +34,8 @@ export async function POST(req: Request) {
             const next = last ? parseInt(last.numero.split('-')[2]) + 1 : 1
             const numero = `FAC-${year}-${String(next).padStart(3, '0')}`
 
-            let totalHt = 0, totalTva = 0
+            let totalHt = 0
+            let totalTva = 0
 
             const invoice = await tx.invoice.create({
                 data: {
@@ -53,29 +54,37 @@ export async function POST(req: Request) {
             })
 
             for (const s of schedules) {
-                const start = s.start_time as unknown as Date
-                const end = s.end_time as unknown as Date
-                const hours = (end.getTime() - start.getTime()) / 36e5
+                // Dates → nombres
+                const start = new Date(s.start_time as unknown as string | Date)
+                const end   = new Date(s.end_time   as unknown as string | Date)
+                const diffMs = end.getTime() - start.getTime()
+                const hours = Math.max(0, diffMs / 36e5)
                 const qty = hours > 0 ? hours : 1
+
+                // Decimal → number
                 const unit = Number(s.taux_applique ?? s.service.price)
-                const lineHt = money(qty * unit)
-                const lineTva = money(lineHt * Number((s.service.taux_tva ?? 20) / 100))
-                totalHt += lineHt
+                const vatRate = Number(s.service.taux_tva ?? 20) / 100
+
+                const lineHt  = money(qty * unit)
+                const lineTva = money(lineHt * vatRate)
+
+                totalHt  += lineHt
                 totalTva += lineTva
 
                 await tx.invoiceItem.create({
                     data: {
                         invoice_id: invoice.id,
                         schedule_id: s.id,
+                        // 🔑 on récupère l'id du service via la relation déjà incluse
+                        serviceId: s.service.id,
                         description: s.service.name,
-                        date_prestation: s.date as unknown as Date,
+                        date_prestation: new Date(s.date as unknown as string | Date),
                         heures: qty,
                         taux_horaire: unit,
                         montant_ht: lineHt,
-                        taux_tva: s.service.taux_tva ?? 20,
+                        taux_tva: Number(s.service.taux_tva ?? 20),
                         montant_tva: lineTva,
                         montant_ttc: money(lineHt + lineTva),
-                        serviceId: s.service_id ?? s.serviceId,
                     }
                 })
 
@@ -98,9 +107,7 @@ export async function POST(req: Request) {
             return updated
         })
 
-        if ('error' in result) {
-            return NextResponse.json(result, { status: 400 })
-        }
+        if ('error' in result) return NextResponse.json(result, { status: 400 })
         return NextResponse.json(result, { status: 201 })
     } catch (e) {
         console.error(e)
